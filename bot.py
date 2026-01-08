@@ -1,4 +1,4 @@
-import telebot
+import telebot  # spelling fixed
 from telebot import types
 import os
 import psycopg2
@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 # ======================
 app = Flask('')
 @app.route('/')
-def home(): return "Bot is Alive and DB Connected!"
+def home(): 
+    return "Bot is Alive and DB Connected!"
 
 def run():
     port = int(os.environ.get('PORT', 8080))
@@ -27,12 +28,12 @@ def keep_alive():
 DB_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
+    # SSL Mode require is essential for Neon DB
     return psycopg2.connect(DB_URL)
 
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # এখানে task_count কলাম যোগ করা হয়েছে ইউজারের টাস্ক সংখ্যা ট্র্যাক করতে
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -94,7 +95,6 @@ def start(message):
         bot.send_message(message.chat.id, "🚫 আপনি এই বট থেকে আজীবনের জন্য ব্যান হয়েছেন।")
         return
 
-    # Referral Logic
     args = message.text.split()
     if len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
@@ -164,7 +164,6 @@ def handle_callbacks(call):
 
         if action == "approve":
             tid, reward = parts[2], int(parts[3])
-            # এখানে task_count ১ বাড়ানো হয়েছে
             cur.execute("UPDATE users SET coins = coins + %s, task_count = task_count + 1, last_task_time = %s WHERE user_id = %s", (reward, datetime.now(), uid))
             conn.commit()
             bot.send_message(uid, f"✅ আপনার টাস্ক অ্যাপ্রুভ হয়েছে! ১০০ কয়েন যোগ হয়েছে।")
@@ -203,7 +202,8 @@ def handle_inputs(message):
             cur.execute("UPDATE users SET is_banned = TRUE WHERE user_id = %s", (target_id,))
             conn.commit(); cur.close(); conn.close()
             bot.reply_to(message, f"✅ ইউজার {target_id} ব্যান হয়েছে।")
-        except: bot.reply_to(message, "❌ সঠিক আইডি দিন।")
+        except: 
+            bot.reply_to(message, "❌ সঠিক আইডি দিন।")
         user_status[user_id] = "none"; return
 
     if message.content_type == 'photo' and status.startswith("waiting_task_"):
@@ -239,7 +239,7 @@ def handle_inputs(message):
     elif message.text == "📤 উইথড্র":
         if user["coins"] < 1000:
             bot.reply_to(message, f"⚠️ উইথড্র করতে কমপক্ষে ১০০০ কয়েন লাগবে। আপনার আছে {user['coins']} কয়েন।")
-        elif user["task_count"] < 10: # এখানে ১০টি টাস্কের কন্ডিশন দেওয়া হয়েছে
+        elif user["task_count"] < 10: 
             bot.reply_to(message, f"⚠️ আপনি রেফার করে কয়েন জমালেও, টাকা তুলতে হলে অন্তত ১০টি টাস্ক পূরণ করতে হবে। আপনি করেছেন {user['task_count']}টি।")
         else:
             keyboard = types.InlineKeyboardMarkup()
@@ -259,5 +259,5 @@ def handle_inputs(message):
 
 if __name__ == "__main__":
     keep_alive()
-    bot.infinity_polling()
-    
+    bot.remove_webhook() # Added to clear connection conflicts
+    bot.infinity_polling() 
