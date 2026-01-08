@@ -1,6 +1,7 @@
 import telebot
 from telebot import types
 import os
+import psycopg2
 from flask import Flask
 from threading import Thread
 
@@ -9,8 +10,7 @@ from threading import Thread
 # ======================
 app = Flask('')
 @app.route('/')
-def home():
-    return "Bot is Running!"
+def home(): return "Bot is Alive and DB Connected!"
 
 def run():
     port = int(os.environ.get('PORT', 8080))
@@ -21,119 +21,203 @@ def keep_alive():
     t.start()
 
 # ======================
-# BOT SETTINGS (Your Info Integrated)
+# DATABASE SETUP (PostgreSQL)
+# ======================
+DB_URL = os.getenv("DATABASE_URL")
+
+def get_db_connection():
+    return psycopg2.connect(DB_URL)
+
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            coins INTEGER DEFAULT 0,
+            completed_tasks TEXT DEFAULT '',
+            is_banned BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    conn.commit()
+    cur.close()
+    conn.close()
+
+init_db()
+
+# ======================
+# BOT SETTINGS
 # ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-ADMIN_ID = 8214414683  # আপনার আইডি
-BOT_USERNAME = "bd_simple_task_bot" # বটের ইউজারনেম
-CHANNEL_LINK = "https://t.me/simpletaskbd24" # চ্যানেল লিংক
-SUPPORT_USER = "@incomelogicbd2" # আপনার ইউজারনেম
+ADMIN_ID = 8214414683 
+BOT_USERNAME = "bd_simple_task_bot"
+SUPPORT_USER = "@incomelogicbd2"
+PAYMENT_GROUP = "https://t.me/simpletaskbd24"
 
-# সাময়িক ইউজার ডাটা
-users = {}
+def get_user_data(user_id):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT coins, completed_tasks, is_banned FROM users WHERE user_id = %s", (user_id,))
+    res = cur.fetchone()
+    if not res:
+        cur.execute("INSERT INTO users (user_id) VALUES (%s)", (user_id,))
+        conn.commit()
+        res = (0, '', False)
+    cur.close()
+    conn.close()
+    return {
+        "coins": res[0],
+        "completed_tasks": res[1].split(',') if res[1] else [],
+        "is_banned": res[2]
+    }
 
-def init_user(user_id, referred_by=None):
-    if user_id not in users:
-        users[user_id] = {
-            "coins": 0,
-            "referred_by": referred_by,
-            "referral_bonus_given": False
-        }
+user_status = {}
 
 # ======================
-# START & REFERRAL LOGIC
+# START COMMAND
 # ======================
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
-    name = message.from_user.first_name or "User"
+    user = get_user_data(user_id)
     
-    # রেফারেল চেক
-    args = message.text.split()
-    ref_id = None
-    if len(args) > 1:
-        try:
-            ref_id = int(args[1])
-            if ref_id == user_id: ref_id = None
-        except: ref_id = None
-
-    init_user(user_id, ref_id)
-
-    # রেফারেল বোনাস লজিক
-    if ref_id and ref_id in users and not users[user_id]["referral_bonus_given"]:
-        users[ref_id]["coins"] += 100
-        users[user_id]["referral_bonus_given"] = True
-        try:
-            bot.send_message(ref_id, f"🎉 অভিনন্দন! আপনার রেফারেল লিংক থেকে <b>{name}</b> জয়েন করেছে। আপনি <b>১০০ কয়েন</b> বোনাস পেয়েছেন।")
-        except: pass
+    if user["is_banned"]:
+        bot.send_message(message.chat.id, "🚫 আপনি এই বট থেকে ব্যান হয়েছেন।")
+        return
 
     keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row("📋 টাস্ক লিস্ট", "🪙 আমার কয়েন")
-    keyboard.row("✅ টাস্ক সম্পন্ন করেছি")
+    keyboard.row("📋 সকল টাস্ক", "🪙 আমার কয়েন")
     keyboard.row("👥 রেফারেল", "📤 উইথড্র")
     keyboard.row("📞 সাপোর্ট")
-    
-    if user_id == ADMIN_ID:
-        keyboard.row("⚙️ অ্যাডমিন প্যানেল")
+    if user_id == ADMIN_ID: keyboard.row("⚙️ অ্যাডমিন প্যানেল")
 
-    welcome_text = (
-        f"👋 <b>আমাদের বটে আপনাকে স্বাগতম!</b>\n\n"
-        f"এখানে আপনি খুব সহজে ছোট ছোট <b>টাস্ক সম্পন্ন করে টাকা আয় করতে পারবেন।</b>\n\n"
-        f"🤖 <b>BD Simple Task Bot</b>\n"
-        f"💰 প্রতি টাস্কে রিওয়ার্ড: <b>১০০</b> কয়েন\n"
-        f"🎁 রেফার বোনাস: <b>১০০</b> কয়েন\n"
-        f"💸 জমানো কয়েন সরাসরি বিকাশ/নগদে উইথড্র দেওয়া যায়।\n\n"
-        f"👇 কাজ শুরু করতে নিচের মেনু ব্যবহার করুন।"
-    )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=keyboard)
+    bot.send_message(message.chat.id, f"👋 স্বাগতম <b>{message.from_user.first_name}</b>!", reply_markup=keyboard)
 
 # ======================
-# MENU HANDLERS
+# TASK LIST
 # ======================
-@bot.message_handler(func=lambda m: True)
-def handle_menu(message):
+@bot.message_handler(func=lambda m: m.text == "📋 সকল টাস্ক")
+def task_list(message):
     user_id = message.from_user.id
-    init_user(user_id)
+    user = get_user_data(user_id)
+    if user["is_banned"]: return
+    
+    keyboard = types.InlineKeyboardMarkup()
+    tasks_info = [
+        ("task_1", 100), ("task_2", 100), ("task_3", 200), ("task_4", 100), ("task_5", 100),
+        ("task_6", 100), ("task_7", 100), ("task_8", 100), ("task_9", 100), ("task_10", 100)
+    ]
+    
+    for i, (tid, coin) in enumerate(tasks_info, 1):
+        status_txt = f"✅ টাস্ক {i} (Done)" if tid in user["completed_tasks"] else f"টাস্ক {i} ({coin} কয়েন)"
+        keyboard.add(types.InlineKeyboardButton(status_txt, callback_data=tid))
+            
+    bot.send_message(message.chat.id, "👇 নিচের যেকোনো টাস্ক ক্লিক করে কাজ সম্পন্ন করুন:", reply_markup=keyboard)
 
-    if message.text == "📋 টাস্ক লিস্ট":
-        bot.reply_to(
-            message, 
-            f"📋 <b>আজকের টাস্ক</b>\n\n"
-            f"👉 আমাদের অফিশিয়াল চ্যানেলে জয়েন করুন:\n{CHANNEL_LINK}\n\n"
-            f"🏆 রিওয়ার্ড: <b>১০০</b> কয়েন।\n\n"
-            f"<i>জয়েন করা শেষ হলে '✅ টাস্ক সম্পন্ন করেছি' বাটনে ক্লিক করুন।</i>"
-        )
+# ======================
+# CALLBACK HANDLER
+# ======================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    user_id = call.from_user.id
+    user = get_user_data(user_id)
+
+    task_details = {
+        "task_1": "https://a29226311-ctrl.github.io/task1/",
+        "task_2": "https://a29226311-ctrl.github.io/task2/",
+        "task_3": "https://a29226311-ctrl.github.io/singup/",
+        "task_4": "https://a29226311-ctrl.github.io/app/",
+        "task_5": "https://a29226311-ctrl.github.io/abcd/",
+        "task_6": "https://a29226311-ctrl.github.io/srst/",
+        "task_7": "https://a29226311-ctrl.github.io/bhre/",
+        "task_8": "https://a29226311-ctrl.github.io/auts/",
+        "task_9": "https://a29226311-ctrl.github.io/katr/",
+        "task_10": "https://a29226311-ctrl.github.io/tyre/"
+    }
+
+    if call.data in task_details:
+        if call.data in user["completed_tasks"]:
+            bot.answer_callback_query(call.id, "❌ আপনি এটি আগেই করেছেন!", show_alert=True)
+            return
+            
+        user_status[user_id] = f"waiting_{call.data}"
+        link = task_details[call.data]
+        
+        msg = f"📋 <b>{call.data.replace('task_', 'টাস্ক ')}</b>\n\n"
+        msg += f"🛠 <b>কিভাবে কাজ করবেন নির্দেশনা লিংকের ভিতর দেয়া আছে।</b>\n\n"
+        msg += f"🔗 <b>লিঙ্ক:</b> {link}\n\n"
+        msg += f"📸 কাজ শেষ করে নিচে স্ক্রিনশটটি পাঠান।"
+        
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="HTML")
+
+    elif call.data.startswith("pay_"):
+        method = call.data.replace("pay_", "")
+        user_status[user_id] = f"waiting_number_{method}"
+        bot.edit_message_text(f"📱 আপনার <b>{method}</b> নাম্বারটি লিখে সেন্ড করুন।", call.message.chat.id, call.message.message_id)
+
+    elif "_" in call.data and user_id == ADMIN_ID:
+        parts = call.data.split("_")
+        action, uid = parts[0], int(parts[1])
+        conn = get_db_connection(); cur = conn.cursor()
+
+        if action == "approve":
+            tid, reward = parts[2], int(parts[3])
+            target_user = get_user_data(uid)
+            if tid not in target_user["completed_tasks"]:
+                new_tasks = ",".join(target_user["completed_tasks"] + [tid])
+                cur.execute("UPDATE users SET coins = coins + %s, completed_tasks = %s WHERE user_id = %s", (reward, new_tasks, uid))
+                conn.commit()
+                bot.send_message(uid, f"💰 অভিনন্দন! {reward} কয়েন যোগ হয়েছে।\n✅ পেমেন্ট প্রুফ গ্রুপ: {PAYMENT_GROUP}")
+                bot.edit_message_caption(f"✅ Approved for {uid}", call.message.chat.id, call.message.message_id)
+        elif action == "reject":
+            bot.send_message(uid, "❌ আপনার প্রুফটি সঠিক নয়। দয়া করে নির্দেশনা মেনে আবার কাজ করুন।")
+            bot.edit_message_caption(f"❌ Rejected for {uid}", call.message.chat.id, call.message.message_id)
+        
+        cur.close(); conn.close()
+
+# ======================
+# INPUT HANDLER
+# ======================
+@bot.message_handler(content_types=['text', 'photo'])
+def handle_inputs(message):
+    user_id = message.from_user.id
+    user = get_user_data(user_id)
+    status = user_status.get(user_id, "none")
+
+    if message.content_type == 'photo' and status.startswith("waiting_task_"):
+        tid = status.replace("waiting_", "")
+        rewards = {"task_1": 100, "task_2": 150, "task_3": 200, "task_4": 100, "task_5": 300, "task_6": 150, "task_7": 200, "task_8": 100, "task_9": 500, "task_10": 250}
+        reward = rewards.get(tid, 50)
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.row(types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}_{tid}_{reward}"),
+                   types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}"))
+        
+        bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=f"🔔 নতুন প্রুফ!\nID: {user_id}\nTask: {tid}", reply_markup=markup)
+        bot.reply_to(message, "✅ আপনার প্রুফ জমা হয়েছে! অ্যাডমিন চেক করে রিওয়ার্ড দিয়ে দেবে।")
+        user_status[user_id] = "none"
+
+    elif message.content_type == 'text' and status.startswith("waiting_number_"):
+        method = status.replace("waiting_number_", "")
+        bot.send_message(ADMIN_ID, f"💰 <b>উইথড্র রিকোয়েস্ট!</b>\n🆔 আইডি: {user_id}\n💳 মেথড: {method}\n📱 নাম্বার: {message.text}\n🪙 কয়েন: {user['coins']}")
+        bot.reply_to(message, "✅ আপনার রিকোয়েস্ট জমা হয়েছে। ২৪ ঘণ্টার মধ্যে পেমেন্ট পেয়ে যাবেন।")
+        user_status[user_id] = "none"
 
     elif message.text == "🪙 আমার কয়েন":
-        bot.reply_to(message, f"🪙 আপনার বর্তমান ব্যালেন্স:\n<b>{users[user_id]['coins']} কয়েন</b>")
-
-    elif message.text == "👥 রেফারেল":
-        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-        bot.reply_to(
-            message, 
-            f"👥 <b>আপনার রেফারেল লিংক:</b>\n\n<code>{link}</code>\n\n"
-            f"🎁 প্রতি সফল রেফারে পাবেন <b>১০০ কয়েন</b>!\n"
-            f"লিংকটি কপি করে বন্ধুদের পাঠান।"
-        )
-
-    elif message.text == "✅ টাস্ক সম্পন্ন করেছি":
-        bot.reply_to(message, "✅ আপনার টাস্ক রিভিউতে পাঠানো হয়েছে। অ্যাডমিন চেক করে কিছুক্ষণের মধ্যে কয়েন যোগ করে দিবে।")
-        bot.send_message(ADMIN_ID, f"🔔 <b>টাস্ক অ্যালার্ট!</b>\nইউজার আইডি: <code>{user_id}</code>\nনাম: {message.from_user.first_name}\nটাস্ক চেক করুন।")
-
-    elif message.text == "📤 উইথড্র":
-        bot.reply_to(message, f"📤 উইথড্র করতে কমপক্ষে <b>১০০০</b> কয়েন প্রয়োজন। আপনার ব্যালেন্স হয়ে গেলে সাপোর্টে {SUPPORT_USER} যোগাযোগ করুন।")
-
+        bot.reply_to(message, f"🪙 আপনার বর্তমান ব্যালেন্স: <b>{user['coins']} কয়েন</b>")
     elif message.text == "📞 সাপোর্ট":
-        bot.reply_to(message, f"📞 যেকোনো প্রয়োজনে আমাদের সাথে যোগাযোগ করুন:\n👉 {SUPPORT_USER}")
-
-    elif message.text == "⚙️ অ্যাডমিন প্যানেল" and user_id == ADMIN_ID:
-        total_users = len(users)
-        bot.reply_to(message, f"⚙️ <b>অ্যাডমিন কন্ট্রোল</b>\n\n👥 মোট ইউজার: {total_users}\n📢 সিস্টেম স্ট্যাটাস: সচল")
+        bot.reply_to(message, f"📢 আমাদের সাপোর্ট গ্রুপ: {PAYMENT_GROUP}\n👤 অ্যাডমিন: {SUPPORT_USER}")
+    elif message.text == "📤 উইথড্র":
+        if user["coins"] < 1000:
+            bot.reply_to(message, "⚠️ উইথড্র করতে কমপক্ষে ১০০০ কয়েন লাগবে।")
+        else:
+            keyboard = types.InlineKeyboardMarkup()
+            keyboard.row(types.InlineKeyboardButton("বিকাশ", callback_data="pay_Bkash"), types.InlineKeyboardButton("নগদ", callback_data="pay_Nagad"))
+            bot.send_message(message.chat.id, "💳 পেমেন্ট মেথড সিলেক্ট করুন:", reply_markup=keyboard)
 
 if __name__ == "__main__":
     keep_alive()
-    print("✅ Bot is ready with your info!")
     bot.infinity_polling()
     
