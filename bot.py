@@ -33,7 +33,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # টেবিল তৈরির কোড
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -45,17 +44,14 @@ def init_db():
             is_banned BOOLEAN DEFAULT FALSE
         )
     ''')
-    
-    # [FIX] কলাম চেক এবং অটো-অ্যাড করার কোড (আপনার এরর সমাধানের জন্য)
     try:
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS completed_tasks TEXT DEFAULT \'\'')
         cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS task_count INTEGER DEFAULT 0')
-        conn.commit()
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_task_time TIMESTAMP')
     except:
         conn.rollback()
-        
     conn.commit()
-    cur.close()
-    conn.close()
+    cur.close(); conn.close()
 
 init_db()
 
@@ -71,22 +67,27 @@ SUPPORT_USER = "@incomelogicbd2"
 PAYMENT_GROUP = "https://t.me/simpletaskbd24"
 
 def get_user_data(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT coins, task_count, is_banned, last_task_time, referred_by FROM users WHERE user_id = %s", (user_id,))
+    conn = get_db_connection(); cur = conn.cursor()
+    cur.execute("SELECT coins, task_count, is_banned, last_task_time, referred_by, completed_tasks FROM users WHERE user_id = %s", (user_id,))
     res = cur.fetchone()
+    
     if not res:
-        cur.execute("INSERT INTO users (user_id) VALUES (%s)", (user_id,))
+        cur.execute("INSERT INTO users (user_id, completed_tasks) VALUES (%s, '')", (user_id,))
         conn.commit()
-        res = (0, 0, False, None, None)
-    cur.close()
-    conn.close()
+        return {"coins": 0, "task_count": 0, "is_banned": False, "last_task_time": None, "referred_by": None, "completed_tasks": ""}
+    
+    coins, task_count, is_banned, last_task_time, referred_by, completed_tasks = res
+    
+    # [FIX] ২৪ ঘণ্টা পর অটোমেটিক টাস্ক রিসেট লজিক
+    if last_task_time and datetime.now() >= last_task_time + timedelta(hours=24):
+        cur.execute("UPDATE users SET completed_tasks = '' WHERE user_id = %s", (user_id,))
+        conn.commit()
+        completed_tasks = ""
+
+    cur.close(); conn.close()
     return {
-        "coins": res[0],
-        "task_count": res[1],
-        "is_banned": res[2],
-        "last_task_time": res[3],
-        "referred_by": res[4]
+        "coins": coins, "task_count": task_count, "is_banned": is_banned,
+        "last_task_time": last_task_time, "referred_by": referred_by, "completed_tasks": completed_tasks or ""
     }
 
 user_status = {}
@@ -98,11 +99,8 @@ user_status = {}
 def start(message):
     user_id = message.from_user.id
     user = get_user_data(user_id)
+    if user["is_banned"]: return
     
-    if user["is_banned"]:
-        bot.send_message(message.chat.id, "🚫 আপনি এই বট থেকে আজীবনের জন্য ব্যান হয়েছেন।")
-        return
-
     args = message.text.split()
     if len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
@@ -118,35 +116,16 @@ def start(message):
     keyboard.row("👥 রেফারেল", "📤 উইথড্র")
     keyboard.row("📞 সাপোর্ট")
     if user_id == ADMIN_ID: keyboard.row("⚙️ অ্যাডমিন প্যানেল")
-
-    welcome_msg = f"👋 স্বাগতম, {message.from_user.first_name}!\n\nছোট ছোট টাস্ক সম্পন্ন করে কয়েন ইনকাম করুন।\n🚀 কাজ শুরু করতে '📋 সকল টাস্ক' বাটনে ক্লিক করুন।"
-    bot.send_message(message.chat.id, welcome_msg, reply_markup=keyboard)
+    bot.send_message(message.chat.id, f"👋 স্বাগতম, {message.from_user.first_name}!", reply_markup=keyboard)
 
 # ======================
-# ADMIN PANEL
-# ======================
-@bot.message_handler(func=lambda m: m.text == "⚙️ অ্যাডমিন প্যানেল")
-def admin_panel(message):
-    if message.from_user.id == ADMIN_ID:
-        conn = get_db_connection(); cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users"); total_users = cur.fetchone()[0]
-        cur.close(); conn.close()
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🚫 ইউজার ব্যান করুন", callback_data="admin_ban_user"))
-        bot.send_message(message.chat.id, f"📊 অ্যাডমিন প্যানেল\n👥 মোট ইউজার: {total_users} জন", reply_markup=markup)
-
-# ======================
-# CALLBACKS & ADMIN CONTROL
+# CALLBACK HANDLER
 # ======================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     user_id = call.from_user.id
+    user = get_user_data(user_id)
     
-    if call.data == "admin_ban_user" and user_id == ADMIN_ID:
-        user_status[user_id] = "waiting_ban_id"
-        bot.send_message(call.message.chat.id, "🆔 আপনি যাকে ব্যান করতে চান তার ইউজার আইডি দিন:")
-        return
-
     task_details = {
         "task_1": "https://a29226311-ctrl.github.io/task1/", "task_2": "https://a29226311-ctrl.github.io/task2/",
         "task_3": "https://a29226311-ctrl.github.io/singup/", "task_4": "https://a29226311-ctrl.github.io/app/",
@@ -156,117 +135,60 @@ def handle_callbacks(call):
     }
 
     if call.data in task_details:
+        if call.data in user["completed_tasks"].split(","):
+            bot.answer_callback_query(call.id, "⚠️ এই টাস্কটি সম্পন্ন হয়েছে। ২৪ ঘণ্টা পর আবার করতে পারবেন।")
+            return
         user_status[user_id] = f"waiting_{call.data}"
-        msg = f"📋 <b>{call.data.replace('task_', 'টাস্ক ')}</b>\n\n🔗 <b>লিঙ্ক:</b> {task_details[call.data]}\n\n📸 কাজ শেষ করে স্ক্রিনশটটি এখানে পাঠান।"
-        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
-
-    elif call.data.startswith("pay_"):
-        method = call.data.replace("pay_", "")
-        user_status[user_id] = f"waiting_number_{method}"
-        bot.edit_message_text(f"📱 আপনার <b>{method}</b> নাম্বারটি লিখুন:", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text(f"📋 <b>{call.data.replace('task_', 'টাস্ক ')}</b>\n\n📸 স্ক্রিনশটটি পাঠান।", call.message.chat.id, call.message.message_id)
 
     elif "_" in call.data and user_id == ADMIN_ID:
         parts = call.data.split("_")
         action, uid = parts[0], int(parts[1])
         conn = get_db_connection(); cur = conn.cursor()
-
+        
         if action == "approve":
-            tid, reward = parts[2], int(parts[3])
-            cur.execute("UPDATE users SET coins = coins + %s, task_count = task_count + 1, last_task_time = %s WHERE user_id = %s", (reward, datetime.now(), uid))
+            tid = parts[2]
+            # অ্যাপ্রুভ করলে ১০০ কয়েন যোগ এবং বর্তমান সময় সেভ হবে
+            cur.execute("UPDATE users SET coins = coins + 100, task_count = task_count + 1, last_task_time = %s, completed_tasks = CASE WHEN completed_tasks = '' THEN %s ELSE completed_tasks || ',' || %s END WHERE user_id = %s", (datetime.now(), tid, tid, uid))
             conn.commit()
             bot.send_message(uid, f"✅ আপনার টাস্ক অ্যাপ্রুভ হয়েছে! ১০০ কয়েন যোগ হয়েছে।")
-            bot.edit_message_caption(f"✅ Approved User: {uid}", call.message.chat.id, call.message.message_id)
+            bot.edit_message_caption(f"✅ Approved: {uid}", call.message.chat.id, call.message.message_id)
         elif action == "reject":
             bot.send_message(uid, "❌ আপনার প্রুফটি সঠিক নয়।")
-            bot.edit_message_caption(f"❌ Rejected User: {uid}", call.message.chat.id, call.message.message_id)
-        elif action == "ban":
-            cur.execute("UPDATE users SET is_banned = TRUE WHERE user_id = %s", (uid,))
-            conn.commit()
-            bot.send_message(uid, "🚫 আপনাকে ব্যান করা হয়েছে।")
-            bot.edit_message_caption(f"🚫 Banned User: {uid}", call.message.chat.id, call.message.message_id)
-        elif action == "paycomplete":
-            cur.execute("UPDATE users SET coins = coins - 1000 WHERE user_id = %s", (uid,))
-            conn.commit()
-            bot.send_message(uid, "💰 উইথড্র রিকোয়েস্ট সফল! ১০০০ কয়েন কাটা হয়েছে।")
-            bot.edit_message_text(f"✅ Paid for {uid}", call.message.chat.id, call.message.message_id)
+            bot.edit_message_caption(f"❌ Rejected: {uid}", call.message.chat.id, call.message.message_id)
         
         cur.close(); conn.close()
 
 # ======================
-# INPUT HANDLER
+# MESSAGE HANDLER
 # ======================
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_inputs(message):
     user_id = message.from_user.id
     user = get_user_data(user_id)
-    if user["is_banned"]: return
-    
     status = user_status.get(user_id, "none")
-
-    if user_id == ADMIN_ID and status == "waiting_ban_id":
-        try:
-            target_id = int(message.text)
-            conn = get_db_connection(); cur = conn.cursor()
-            cur.execute("UPDATE users SET is_banned = TRUE WHERE user_id = %s", (target_id,))
-            conn.commit(); cur.close(); conn.close()
-            bot.reply_to(message, f"✅ ইউজার {target_id} ব্যান হয়েছে।")
-        except: bot.reply_to(message, "❌ সঠিক আইডি দিন।")
-        user_status[user_id] = "none"; return
 
     if message.content_type == 'photo' and status.startswith("waiting_task_"):
         tid = status.replace("waiting_", "")
         markup = types.InlineKeyboardMarkup()
-        markup.row(types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}_{tid}_100"),
+        markup.row(types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user_id}_{tid}"),
                    types.InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}"))
-        markup.row(types.InlineKeyboardButton("🚫 Ban User", callback_data=f"ban_{user_id}"))
         bot.send_photo(ADMIN_ID, message.photo[-1].file_id, caption=f"🔔 নতুন প্রুফ!\nID: {user_id}\nTask: {tid}", reply_markup=markup)
         bot.reply_to(message, "✅ প্রুফ জমা হয়েছে। অ্যাডমিন চেক করলে কয়েন পাবেন।")
         user_status[user_id] = "none"
 
     elif message.text == "📋 সকল টাস্ক":
-        if user["last_task_time"] and datetime.now() < user["last_task_time"] + timedelta(hours=24):
-            wait_time = (user["last_task_time"] + timedelta(hours=24)) - datetime.now()
-            hours, remainder = divmod(wait_time.seconds, 3600); minutes, _ = divmod(remainder, 60)
-            bot.reply_to(message, f"⚠️ আবার কাজ করতে {hours} ঘণ্টা {minutes} মিনিট অপেক্ষা করুন।")
-            return
+        completed_list = user["completed_tasks"].split(",")
         keyboard = types.InlineKeyboardMarkup()
-        tasks_info = [("task_1", 100), ("task_2", 100), ("task_3", 100), ("task_4", 100), ("task_5", 100),
-                      ("task_6", 100), ("task_7", 100), ("task_8", 100), ("task_9", 100), ("task_10", 100)]
-        for i, (tid, coin) in enumerate(tasks_info, 1):
-            keyboard.add(types.InlineKeyboardButton(f"✨ টাস্ক {i} ({coin} কয়েন)", callback_data=tid))
+        for i in range(1, 11):
+            tid = f"task_{i}"
+            btn_text = f"✅ টাস্ক {i} (Done)" if tid in completed_list else f"✨ টাস্ক {i} (১০০ কয়েন)"
+            keyboard.add(types.InlineKeyboardButton(btn_text, callback_data=tid))
         bot.send_message(message.chat.id, "👇 টাস্কগুলো সম্পন্ন করুন:", reply_markup=keyboard)
-
-    elif message.text == "👥 রেফারেল":
-        ref_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-        bot.reply_to(message, f"👥 আপনার রেফারেল লিঙ্ক:\n<code>{ref_link}</code>\n\nপ্রতি রেফারে পাবেন ১০০ কয়েন!")
 
     elif message.text == "🪙 আমার কয়েন":
         bot.reply_to(message, f"🪙 ব্যালেন্স: {user['coins']} কয়েন\n✅ মোট সম্পন্ন টাস্ক: {user['task_count']} টি")
-    
-    elif message.text == "📤 উইথড্র":
-        if user["coins"] < 1000:
-            bot.reply_to(message, f"⚠️ উইথড্র করতে কমপক্ষে ১০০০ কয়েন লাগবে। আপনার আছে {user['coins']} কয়েন।")
-        elif user["task_count"] < 10: 
-            bot.reply_to(message, f"⚠️ টাকা তুলতে কমপক্ষে ১০টি টাস্ক পূরণ করতে হবে। আপনি করেছেন {user['task_count']}টি।")
-        else:
-            keyboard = types.InlineKeyboardMarkup()
-            keyboard.row(types.InlineKeyboardButton("বিকাশ", callback_data="pay_Bkash"), types.InlineKeyboardButton("রকেট", callback_data="pay_Rocket"))
-            bot.send_message(message.chat.id, "💳 পেমেন্ট মেথড সিলেক্ট করুন:", reply_markup=keyboard)
 
-    elif message.text == "📞 সাপোর্ট":
-        bot.reply_to(message, f"📢 সাপোর্ট গ্রুপ: {PAYMENT_GROUP}")
-
-    elif message.content_type == 'text' and status.startswith("waiting_number_"):
-        method = status.replace("waiting_number_", "")
-        pay_markup = types.InlineKeyboardMarkup()
-        pay_markup.add(types.InlineKeyboardButton("✅ সম্পন্ন", callback_data=f"paycomplete_{user_id}"))
-        bot.send_message(ADMIN_ID, f"💰 উইথড্র রিকোয়েস্ট!\n🆔 আইডি: {user_id}\n💳 মেথড: {method}\n📱 নাম্বার: {message.text}\n✅ সম্পন্ন টাস্ক: {user['task_count']}টি", reply_markup=pay_markup)
-        bot.reply_to(message, "✅ রিকোয়েস্ট জমা হয়েছে।")
-        user_status[user_id] = "none"
-
-# ======================
-# MAIN RUNNER
-# ======================
 if __name__ == "__main__":
     keep_alive()
     bot.remove_webhook()
