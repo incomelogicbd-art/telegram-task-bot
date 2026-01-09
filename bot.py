@@ -1,4 +1,4 @@
-import telebot  # spelling fixed
+import telebot
 from telebot import types
 import os
 import psycopg2
@@ -7,7 +7,7 @@ from threading import Thread
 from datetime import datetime, timedelta
 
 # ======================
-# RENDER FIX: WEB SERVER
+# WEB SERVER FOR HOSTING
 # ======================
 app = Flask('')
 @app.route('/')
@@ -28,12 +28,12 @@ def keep_alive():
 DB_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
-    # SSL Mode require is essential for Neon DB
     return psycopg2.connect(DB_URL)
 
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    # টেবিল তৈরির কোড
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -45,6 +45,14 @@ def init_db():
             is_banned BOOLEAN DEFAULT FALSE
         )
     ''')
+    
+    # [FIX] কলাম চেক এবং অটো-অ্যাড করার কোড (আপনার এরর সমাধানের জন্য)
+    try:
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS task_count INTEGER DEFAULT 0')
+        conn.commit()
+    except:
+        conn.rollback()
+        
     conn.commit()
     cur.close()
     conn.close()
@@ -202,8 +210,7 @@ def handle_inputs(message):
             cur.execute("UPDATE users SET is_banned = TRUE WHERE user_id = %s", (target_id,))
             conn.commit(); cur.close(); conn.close()
             bot.reply_to(message, f"✅ ইউজার {target_id} ব্যান হয়েছে।")
-        except: 
-            bot.reply_to(message, "❌ সঠিক আইডি দিন।")
+        except: bot.reply_to(message, "❌ সঠিক আইডি দিন।")
         user_status[user_id] = "none"; return
 
     if message.content_type == 'photo' and status.startswith("waiting_task_"):
@@ -240,10 +247,10 @@ def handle_inputs(message):
         if user["coins"] < 1000:
             bot.reply_to(message, f"⚠️ উইথড্র করতে কমপক্ষে ১০০০ কয়েন লাগবে। আপনার আছে {user['coins']} কয়েন।")
         elif user["task_count"] < 10: 
-            bot.reply_to(message, f"⚠️ আপনি রেফার করে কয়েন জমালেও, টাকা তুলতে হলে অন্তত ১০টি টাস্ক পূরণ করতে হবে। আপনি করেছেন {user['task_count']}টি।")
+            bot.reply_to(message, f"⚠️ টাকা তুলতে কমপক্ষে ১০টি টাস্ক পূরণ করতে হবে। আপনি করেছেন {user['task_count']}টি।")
         else:
             keyboard = types.InlineKeyboardMarkup()
-            keyboard.row(types.InlineKeyboardButton("বিকাশ", callback_data="pay_Bkash"), types.InlineKeyboardButton("নগদ", callback_data="pay_Nagad"))
+            keyboard.row(types.InlineKeyboardButton("বিকাশ", callback_data="pay_Bkash"), types.InlineKeyboardButton("রকেট", callback_data="pay_Rocket"))
             bot.send_message(message.chat.id, "💳 পেমেন্ট মেথড সিলেক্ট করুন:", reply_markup=keyboard)
 
     elif message.text == "📞 সাপোর্ট":
@@ -252,12 +259,17 @@ def handle_inputs(message):
     elif message.content_type == 'text' and status.startswith("waiting_number_"):
         method = status.replace("waiting_number_", "")
         pay_markup = types.InlineKeyboardMarkup()
-        pay_markup.add(types.InlineKeyboardButton("✅ পেমেন্ট করেছি (১০০০ কাটুন)", callback_data=f"paycomplete_{user_id}"))
+        pay_markup.add(types.InlineKeyboardButton("✅ সম্পন্ন", callback_data=f"paycomplete_{user_id}"))
         bot.send_message(ADMIN_ID, f"💰 উইথড্র রিকোয়েস্ট!\n🆔 আইডি: {user_id}\n💳 মেথড: {method}\n📱 নাম্বার: {message.text}\n✅ সম্পন্ন টাস্ক: {user['task_count']}টি", reply_markup=pay_markup)
         bot.reply_to(message, "✅ রিকোয়েস্ট জমা হয়েছে।")
         user_status[user_id] = "none"
 
+# ======================
+# MAIN RUNNER
+# ======================
 if __name__ == "__main__":
     keep_alive()
-    bot.remove_webhook() # Added to clear connection conflicts
-    bot.infinity_polling() 
+    bot.remove_webhook()
+    print("Bot is Starting...")
+    bot.infinity_polling()
+    
