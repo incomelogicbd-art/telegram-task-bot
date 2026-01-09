@@ -31,8 +31,7 @@ def get_db_connection():
     return psycopg2.connect(DB_URL)
 
 def init_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
+    conn = get_db_connection(); cur = conn.cursor()
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -45,9 +44,8 @@ def init_db():
         )
     ''')
     try:
-        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS completed_tasks TEXT DEFAULT \'\'')
-        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS task_count INTEGER DEFAULT 0')
         cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_task_time TIMESTAMP')
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS completed_tasks TEXT DEFAULT \'\'')
     except:
         conn.rollback()
     conn.commit()
@@ -78,7 +76,7 @@ def get_user_data(user_id):
     
     coins, task_count, is_banned, last_task_time, referred_by, completed_tasks = res
     
-    # [FIX] ২৪ ঘণ্টা পর অটোমেটিক টাস্ক রিসেট লজিক
+    # ২৪ ঘণ্টা পর টাস্ক রিসেট লজিক
     if last_task_time and datetime.now() >= last_task_time + timedelta(hours=24):
         cur.execute("UPDATE users SET completed_tasks = '' WHERE user_id = %s", (user_id,))
         conn.commit()
@@ -93,7 +91,7 @@ def get_user_data(user_id):
 user_status = {}
 
 # ======================
-# START COMMAND
+# HANDLERS
 # ======================
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -101,6 +99,7 @@ def start(message):
     user = get_user_data(user_id)
     if user["is_banned"]: return
     
+    # রেফারেল হ্যান্ডলিং
     args = message.text.split()
     if len(args) > 1 and args[1].isdigit():
         ref_id = int(args[1])
@@ -116,11 +115,11 @@ def start(message):
     keyboard.row("👥 রেফারেল", "📤 উইথড্র")
     keyboard.row("📞 সাপোর্ট")
     if user_id == ADMIN_ID: keyboard.row("⚙️ অ্যাডমিন প্যানেল")
-    bot.send_message(message.chat.id, f"👋 স্বাগতম, {message.from_user.first_name}!", reply_markup=keyboard)
+    
+    # [FIX] আপনার সেই আগের ওয়েলকাম মেসেজ
+    welcome_msg = f"👋 স্বাগতম, {message.from_user.first_name}!\n\nছোট ছোট টাস্ক সম্পন্ন করে কয়েন ইনকাম করুন।\n🚀 কাজ শুরু করতে '📋 সকল টাস্ক' বাটনে ক্লিক করুন।"
+    bot.send_message(message.chat.id, welcome_msg, reply_markup=keyboard)
 
-# ======================
-# CALLBACK HANDLER
-# ======================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     user_id = call.from_user.id
@@ -135,11 +134,13 @@ def handle_callbacks(call):
     }
 
     if call.data in task_details:
+        # [FIX] টাস্ক লকিং ও লিঙ্ক আসা নিশ্চিত করা
         if call.data in user["completed_tasks"].split(","):
             bot.answer_callback_query(call.id, "⚠️ এই টাস্কটি সম্পন্ন হয়েছে। ২৪ ঘণ্টা পর আবার করতে পারবেন।")
             return
         user_status[user_id] = f"waiting_{call.data}"
-        bot.edit_message_text(f"📋 <b>{call.data.replace('task_', 'টাস্ক ')}</b>\n\n📸 স্ক্রিনশটটি পাঠান।", call.message.chat.id, call.message.message_id)
+        msg = f"📋 <b>{call.data.replace('task_', 'টাস্ক ')}</b>\n\n🔗 <b>লিঙ্ক:</b> {task_details[call.data]}\n\n📸 কাজ শেষ করে স্ক্রিনশটটি এখানে পাঠান।"
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
 
     elif "_" in call.data and user_id == ADMIN_ID:
         parts = call.data.split("_")
@@ -148,7 +149,7 @@ def handle_callbacks(call):
         
         if action == "approve":
             tid = parts[2]
-            # অ্যাপ্রুভ করলে ১০০ কয়েন যোগ এবং বর্তমান সময় সেভ হবে
+            # [FIX] ১০১ এর ঝামেলা মিটিয়ে সরাসরি ১০০ কয়েন
             cur.execute("UPDATE users SET coins = coins + 100, task_count = task_count + 1, last_task_time = %s, completed_tasks = CASE WHEN completed_tasks = '' THEN %s ELSE completed_tasks || ',' || %s END WHERE user_id = %s", (datetime.now(), tid, tid, uid))
             conn.commit()
             bot.send_message(uid, f"✅ আপনার টাস্ক অ্যাপ্রুভ হয়েছে! ১০০ কয়েন যোগ হয়েছে।")
@@ -159,9 +160,6 @@ def handle_callbacks(call):
         
         cur.close(); conn.close()
 
-# ======================
-# MESSAGE HANDLER
-# ======================
 @bot.message_handler(content_types=['text', 'photo'])
 def handle_inputs(message):
     user_id = message.from_user.id
@@ -178,6 +176,13 @@ def handle_inputs(message):
         user_status[user_id] = "none"
 
     elif message.text == "📋 সকল টাস্ক":
+        # ২৪ ঘণ্টার টাইম গ্যাপ চেক লজিক
+        if user["last_task_time"] and datetime.now() < user["last_task_time"] + timedelta(hours=24):
+            wait_time = (user["last_task_time"] + timedelta(hours=24)) - datetime.now()
+            hours, remainder = divmod(wait_time.seconds, 3600); minutes, _ = divmod(remainder, 60)
+            bot.reply_to(message, f"⚠️ আবার কাজ করতে {hours} ঘণ্টা {minutes} মিনিট অপেক্ষা করুন।")
+            return
+        
         completed_list = user["completed_tasks"].split(",")
         keyboard = types.InlineKeyboardMarkup()
         for i in range(1, 11):
